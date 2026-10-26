@@ -1914,6 +1914,11 @@ def _run_pipeline(
         "cross_post_owner": _cross_post_process_owner if should_cross_post else None,
         "warnings": generation_warnings or None,
     }
+    # 使用了需署名的素材（Wikimedia Commons）时，把署名行附在任务结果上；
+    # 同样的内容已写入任务目录下的 credits.txt。
+    material_credits = material.read_material_credits(task_id)
+    if isinstance(material_credits, list) and material_credits:
+        kwargs["credits"] = material_credits
     sm.state.update_task(
         task_id, state=const.TASK_STATE_COMPLETE, progress=100, **kwargs
     )

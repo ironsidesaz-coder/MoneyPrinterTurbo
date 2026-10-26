@@ -1,6 +1,7 @@
 import base64
 from concurrent.futures import ThreadPoolExecutor
 import io
+import json
 import math
 import os
 import random
@@ -33,6 +34,7 @@ from app.services import (
     task_artifacts,
     video,
     volcengine_seedance,
+    wikimedia_commons,
 )
 from app.utils import logging_utils, utils
 
@@ -144,6 +146,16 @@ def _material_source_record(item: MaterialInfo, local_path: str) -> dict[str, An
     if creator:
         record["creator"] = creator
 
+    # 署名所需的公开字段（目前由 Wikimedia Commons 提供）。
+    for field in ATTRIBUTION_FIELDS:
+        value = source.get(field)
+        if isinstance(value, str) and value.strip():
+            if field == "license_url":
+                value = _safe_public_url(value)
+                if not value:
+                    continue
+            record[field] = value.strip()[:300]
+
     raw_rendition = source.get("rendition")
     if isinstance(raw_rendition, dict):
         rendition = {}
@@ -154,6 +166,50 @@ def _material_source_record(item: MaterialInfo, local_path: str) -> dict[str, An
         if rendition:
             record["rendition"] = rendition
     return record
+
+
+ATTRIBUTION_FIELDS = ("title", "license", "license_url", "credit")
+
+
+def _write_material_credits(task_id: str, material_sources: list[dict[str, Any]]) -> None:
+    """
+    使用了需要署名的素材（Wikimedia Commons）时，在任务目录写入 credits.txt。
+
+    与成片 ``final-*.mp4`` 位于同一目录。没有此类素材时不创建任务目录也不写文件，
+    保持其他素材源的既有行为不变。
+    """
+    lines = wikimedia_commons.credit_lines(material_sources)
+    if not lines:
+        return
+    try:
+        target = Path(utils.task_dir(task_id)) / wikimedia_commons.CREDITS_FILENAME
+        temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
+        temp.write_text(wikimedia_commons.render_credits(lines), encoding="utf-8")
+        os.replace(temp, target)
+    except Exception as exc:
+        logger.warning(
+            "failed to write material credits: "
+            f"task_id={task_id}, error={type(exc).__name__}, detail={exc}"
+        )
+
+
+def read_material_credits(task_id: str) -> list[str]:
+    """从任务清单恢复署名行，供任务结果附带 ``credits`` 字段。"""
+    try:
+        script_path = Path(utils.storage_dir()) / "tasks" / str(task_id) / "script.json"
+        if not script_path.is_file():
+            return []
+        payload = json.loads(script_path.read_text(encoding="utf-8"))
+        records = payload.get("material_sources") if isinstance(payload, dict) else None
+        if not isinstance(records, list):
+            return []
+        return wikimedia_commons.credit_lines(records)
+    except Exception as exc:
+        logger.warning(
+            f"failed to read material credits: task_id={task_id}, "
+            f"error={type(exc).__name__}"
+        )
+        return []
 
 
 def _persist_material_sources(
@@ -177,6 +233,7 @@ def _persist_material_sources(
                 f"saved material source records: "
                 f"task_id={task_id}, count={len(material_sources)}"
             )
+        _write_material_credits(task_id, material_sources)
     except Exception as exc:
         # task_artifacts 自身已经按失败降级设计，这里仍保留最后一道隔离，
         # 防止未来实现调整或目录解析异常意外影响素材下载返回值。
@@ -445,6 +502,118 @@ def search_videos_pexels(
         )
 
     return []
+
+
+def search_videos_wikimedia(
+    search_term: str,
+    minimum_duration: int,
+    video_aspect: VideoAspect = VideoAspect.portrait,
+) -> List[MaterialInfo]:
+    """
+    在 Wikimedia Commons 搜索可商用、仅需署名或无需署名的视频。
+
+    许可证过滤、下载地址白名单与清晰度选择见 ``wikimedia_commons``；请求失败时
+    与其他库存源一致返回空列表，不阻断主流程。
+    """
+    logger.info(f"searching videos on wikimedia commons: term={search_term!r}")
+    try:
+        return wikimedia_commons.search_videos(
+            search_term,
+            minimum_duration,
+            video_aspect,
+            http_get=lambda *args, **kwargs: trace_http_call(
+                "GET", requests.get, *args, **kwargs
+            ),
+            max_bytes=MAX_VIDEO_DOWNLOAD_BYTES,
+            proxies=config.proxy,
+            verify=_get_tls_verify(),
+        )
+    except Exception as e:
+        logger.error(
+            "wikimedia commons video search failed: "
+            f"error={type(e).__name__}, detail={e}"
+        )
+    return []
+
+
+WIKIMEDIA_FALLBACK_PROVIDERS = frozenset({"pexels", "pixabay"})
+_DEFAULT_WIKIMEDIA_FALLBACK_MIN_RESULTS = 5
+
+
+def _wikimedia_fallback_enabled() -> bool:
+    value = config.app.get("enable_wikimedia_fallback", True)
+    if isinstance(value, str):
+        return value.strip().lower() not in ("0", "false", "no", "off", "")
+    return bool(value)
+
+
+def _wikimedia_fallback_min_results() -> int:
+    try:
+        value = int(
+            config.app.get(
+                "wikimedia_fallback_min_results",
+                _DEFAULT_WIKIMEDIA_FALLBACK_MIN_RESULTS,
+            )
+        )
+    except (TypeError, ValueError):
+        value = _DEFAULT_WIKIMEDIA_FALLBACK_MIN_RESULTS
+    return max(1, min(50, value))
+
+
+def _with_wikimedia_fallback(
+    provider: str,
+    primary_items: List[MaterialInfo],
+    search_term: str,
+    minimum_duration: int,
+    video_aspect: VideoAspect,
+) -> List[MaterialInfo]:
+    """
+    主素材源（Pexels/Pixabay）候选不足时，用 Wikimedia Commons 补足。
+
+    只追加、不替换：主素材源结果始终排在前面。后备结果在使用前再次校验
+    下载域名和许可证，防御被篡改或旧版本写入的缓存。
+    """
+    primary_items = list(primary_items or [])
+    if (
+        provider not in WIKIMEDIA_FALLBACK_PROVIDERS
+        or not _wikimedia_fallback_enabled()
+        or len(primary_items) >= _wikimedia_fallback_min_results()
+    ):
+        return primary_items
+
+    logger.info(
+        f"{provider} returned {len(primary_items)} clip(s) for term={search_term!r}, "
+        "trying wikimedia commons fallback"
+    )
+    try:
+        fallback_items = _search_videos_with_cache(
+            provider=wikimedia_commons.PROVIDER,
+            search_videos=search_videos_wikimedia,
+            search_term=search_term,
+            minimum_duration=minimum_duration,
+            video_aspect=video_aspect,
+        )
+    except Exception as exc:
+        logger.warning(
+            "wikimedia commons fallback failed: "
+            f"term={search_term!r}, error={type(exc).__name__}, detail={exc}"
+        )
+        return primary_items
+
+    accepted = []
+    for item in fallback_items or []:
+        source = item.source_info if isinstance(item.source_info, dict) else {}
+        if not wikimedia_commons.is_upload_url(item.url):
+            continue
+        if wikimedia_commons.classify_license(str(source.get("license") or "")) is None:
+            continue
+        accepted.append(item)
+    if accepted:
+        logger.info(
+            f"wikimedia commons fallback added {len(accepted)} clip(s) "
+            f"for term={search_term!r}"
+        )
+    return primary_items + accepted
 
 
 def search_videos_pixabay(
@@ -1178,6 +1347,12 @@ def save_video(video_url: str, save_dir: str = "") -> str:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
     }
+    extra_request_kwargs: dict[str, Any] = {}
+    if wikimedia_commons.is_upload_url(video_url):
+        # Wikimedia 政策要求可识别的 UA；同时禁止跳转，确保只从
+        # upload.wikimedia.org 取回 API 给出的文件。
+        headers = {"User-Agent": wikimedia_commons.USER_AGENT}
+        extra_request_kwargs["allow_redirects"] = False
 
     # A nonempty file is treated as a cache hit above. Keep the final path
     # unpublished until the complete download has passed media validation, so a
@@ -1200,6 +1375,7 @@ def save_video(video_url: str, save_dir: str = "") -> str:
                 verify=_get_tls_verify(),
                 timeout=(60, 240),
                 stream=True,
+                **extra_request_kwargs,
             ) as response:
                 response.raise_for_status()
                 headers = getattr(response, "headers", {}) or {}
@@ -2194,12 +2370,15 @@ def download_videos(
         minimum_duration: int,
         video_aspect: VideoAspect,
     ) -> List[MaterialInfo]:
-        return _search_videos_with_cache(
+        items = _search_videos_with_cache(
             provider=provider,
             search_videos=remote_search_videos,
             search_term=search_term,
             minimum_duration=minimum_duration,
             video_aspect=video_aspect,
+        )
+        return _with_wikimedia_fallback(
+            provider, items, search_term, minimum_duration, video_aspect
         )
 
     material_directory = config.app.get("material_directory", "").strip()

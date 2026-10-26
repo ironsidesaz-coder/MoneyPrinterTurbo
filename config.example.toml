@@ -99,6 +99,18 @@ pexels_api_keys = []
 # Register at https://pixabay.com/api/docs/
 pixabay_api_keys = []
 
+# When Pexels or Pixabay returns too few clips for a search term, fill the gap
+# with videos from Wikimedia Commons (public MediaWiki API, no key needed).
+# Only public domain, CC0 and CC BY licensed files are used; CC BY-SA, NC, ND,
+# fair-use and unknown licenses are rejected. Attribution for every Commons
+# clip is written to credits.txt next to the final video and added to the
+# task result. Set to false to disable.
+# Pexels/Pixabay 结果不足时，用 Wikimedia Commons 中公有领域、CC0、CC BY 许可的
+# 视频补足，并在成片目录生成 credits.txt 署名清单。
+enable_wikimedia_fallback = true
+# Fallback triggers when the primary source returns fewer clips than this.
+# wikimedia_fallback_min_results = 5
+
 # Register at https://coverr.co/developers?ctx=header_navigation
 coverr_api_keys = []
 

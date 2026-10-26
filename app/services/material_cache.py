@@ -94,6 +94,16 @@ def _cached_source_info(item: MaterialInfo) -> dict | None:
         if creator:
             cached["creator"] = creator
 
+    # 署名字段（Wikimedia Commons）：许可证必须随缓存保留，否则命中缓存的
+    # 后备素材会因缺少许可证被拒绝，且 credits.txt 无法生成。
+    for field in ("title", "license", "credit"):
+        value = source.get(field)
+        if isinstance(value, str) and value.strip():
+            cached[field] = value.strip()[:300]
+    license_url = _safe_public_url(source.get("license_url"))
+    if license_url:
+        cached["license_url"] = license_url
+
     raw_rendition = source.get("rendition")
     if isinstance(raw_rendition, dict):
         rendition = {}

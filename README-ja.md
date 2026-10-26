@@ -385,6 +385,7 @@ uv sync --frozen
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+pip install --no-deps -r requirements-nodeps.txt
 ```
 
 補足:

@@ -430,6 +430,7 @@ If you are not using `uv` yet, you can still use `venv + pip`.
 python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+pip install --no-deps -r requirements-nodeps.txt
 ```
 
 Notes:

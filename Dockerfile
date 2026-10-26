@@ -80,7 +80,7 @@ RUN set -u; \
     rm -rf /var/lib/apt/lists/*
 
 # Copy only the requirements.txt first to leverage Docker cache
-COPY requirements.txt ./
+COPY requirements.txt requirements-nodeps.txt ./
 
 # 本地默认优先国内 PyPI 镜像；GHCR 发布使用官方 PyPI，避免海外 runner 因跨境镜像访问变慢。
 RUN if [ "$PIP_USE_OFFICIAL" = "1" ]; then \
@@ -90,6 +90,9 @@ RUN if [ "$PIP_USE_OFFICIAL" = "1" ]; then \
         pip install --no-cache-dir -i https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple/ --trusted-host mirrors.tuna.tsinghua.edu.cn --retries 3 --timeout 60 -r requirements.txt || \
         pip install --no-cache-dir --retries 3 --timeout 60 -r requirements.txt; \
     fi
+
+# moviepy 2.2.1 caps pillow<12; install it without deps so the patched pillow stays.
+RUN pip install --no-cache-dir --no-deps --retries 3 --timeout 60 -r requirements-nodeps.txt
 
 # Now copy the rest of the codebase into the image
 COPY . .

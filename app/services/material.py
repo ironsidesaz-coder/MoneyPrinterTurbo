@@ -517,6 +517,7 @@ def search_videos_wikimedia(
     """
     logger.info(f"searching videos on wikimedia commons: term={search_term!r}")
     try:
+        content_filter = _wikimedia_content_filter()
         return wikimedia_commons.search_videos(
             search_term,
             minimum_duration,
@@ -527,6 +528,7 @@ def search_videos_wikimedia(
             max_bytes=MAX_VIDEO_DOWNLOAD_BYTES,
             proxies=config.proxy,
             verify=_get_tls_verify(),
+            content_filter=content_filter,
         )
     except Exception as e:
         logger.error(
@@ -545,6 +547,23 @@ def _wikimedia_fallback_enabled() -> bool:
     if isinstance(value, str):
         return value.strip().lower() not in ("0", "false", "no", "off", "")
     return bool(value)
+
+
+def _config_string_list(key: str) -> list[str]:
+    value = config.app.get(key, [])
+    if isinstance(value, str):
+        value = value.split(",")
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [item.strip() for item in value if isinstance(item, str) and item.strip()]
+
+
+def _wikimedia_content_filter() -> "wikimedia_commons.ContentFilter":
+    """内置敏感词表 + config 中 ``wikimedia_blocked_terms`` / ``wikimedia_allowed_phrases``。"""
+    return wikimedia_commons.ContentFilter(
+        extra_blocked_terms=_config_string_list("wikimedia_blocked_terms"),
+        extra_allowed_phrases=_config_string_list("wikimedia_allowed_phrases"),
+    )
 
 
 def _wikimedia_fallback_min_results() -> int:
@@ -585,9 +604,11 @@ def _with_wikimedia_fallback(
         f"{provider} returned {len(primary_items)} clip(s) for term={search_term!r}, "
         "trying wikimedia commons fallback"
     )
+    content_filter = _wikimedia_content_filter()
     try:
         fallback_items = _search_videos_with_cache(
-            provider=wikimedia_commons.PROVIDER,
+            # 缓存键带上词表指纹：修改词表或升级默认词表后不会复用旧结果。
+            provider=f"{wikimedia_commons.PROVIDER}-cf{content_filter.signature}",
             search_videos=search_videos_wikimedia,
             search_term=search_term,
             minimum_duration=minimum_duration,
@@ -606,6 +627,9 @@ def _with_wikimedia_fallback(
         if not wikimedia_commons.is_upload_url(item.url):
             continue
         if wikimedia_commons.classify_license(str(source.get("license") or "")) is None:
+            continue
+        # 缓存只保留标题，描述与分类已在搜索时过滤；这里再按标题兜底一次。
+        if content_filter.match(str(source.get("title") or "")):
             continue
         accepted.append(item)
     if accepted:

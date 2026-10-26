@@ -16,11 +16,14 @@ CC BY 要求署名，因此每条结果都携带标题、作者、许可证与�
 
 from __future__ import annotations
 
+import hashlib
 import html
 import math
 import re
 from typing import Any, Callable, Iterable
 from urllib.parse import urlsplit
+
+from loguru import logger
 
 from app.models.schema import MaterialInfo, VideoAspect
 
@@ -48,6 +51,162 @@ _DENY_TOKENS = re.compile(
 )
 _CC_BY_SHORT = re.compile(r"^cc[- ]by(?:[- ]\d(?:\.\d)?)?(?:[- ][a-z]{2,}(?:[- ][a-z]{2,})?)?$")
 _CC_BY_TEMPLATE = re.compile(r"^cc-by(?:-\d(?:\.\d)?)?(?:-[a-z]{2,})*$")
+
+
+# ---------------------------------------------------------------------------
+# 内容过滤
+#
+# Commons 收录大量新闻、档案与执法记录视频（例如警方公开的肇事逃逸监控、战争
+# 档案片），它们许可证合规却不适合作为通用配图。下面的词表在标题、描述
+# （ObjectName / ImageDescription）和分类（extmetadata Categories）上做整词匹配：
+#
+# * 词条按“整词/整短语”匹配，前后不能紧邻字母或数字，因此 ``deadline``、
+#   ``skill``、``warsaw``、``bodyboard`` 不会命中 ``dead``/``kill``/``war``/``body``。
+# * 刻意不收录过宽的单词（``body``、``police``、``operation``、``hunting``），
+#   改用 ``dead body``、``police dashcam`` 这类短语，避免误杀 ``body of water``、
+#   警察乐队巡游等普通素材。
+# * 先移除“安全短语”再匹配，例如 ``crashing waves``、``dead sea``、
+#   ``shooting star``、``killer whale``，让海浪、地名和天文素材照常通过。
+#   ``crashing`` 本身不在词表中，只有 ``crash``/``crashes``/``crashed`` 会命中。
+# * 连字符和下划线视为空格（``hit-and-run`` == ``hit and run``）。
+#
+# 已知误伤：姓氏或地名中的词（如 ``Jason Slaughter``、``Bloody Creek``）也会被拒，
+# 可用 ``wikimedia_allowed_phrases`` 放行。
+#
+# 宁可多拒绝：后备源只是补位，误拒一条普通素材的代价远低于在成片中出现
+# 伤亡画面。用户可通过 ``wikimedia_blocked_terms`` / ``wikimedia_allowed_phrases``
+# 扩展两张表。
+# ---------------------------------------------------------------------------
+DEFAULT_BLOCKED_TERMS: tuple[str, ...] = (
+    # 事故 / 碰撞
+    "crash", "crashes", "crashed", "car crash", "plane crash", "collision", "collisions",
+    "accident", "accidents", "hit and run", "wreck", "wreckage", "pileup", "pile up",
+    "derailment",
+    # 死亡
+    "fatal", "fatally", "fatality", "fatalities", "death", "deaths", "dead", "die",
+    "died", "dying", "corpse", "corpses", "cadaver", "dead body", "dead bodies",
+    "body bag", "body bags", "human remains", "funeral", "mass grave",
+    # 杀戮 / 暴力
+    "kill", "kills", "killed", "killing", "killings", "murder", "murders", "murdered",
+    "homicide", "manslaughter", "shooting", "shootings", "shot dead", "gunfire",
+    "gunshot", "gunshots", "gunman", "execution", "executions", "executed", "beheading",
+    "stabbing", "massacre", "genocide", "assault", "violence", "violent", "lynching",
+    # 战争 / 爆炸
+    "war", "wars", "warfare", "war footage", "war zone", "combat", "battle", "battles",
+    "battlefield", "airstrike", "airstrikes", "air strike", "bomb", "bombs", "bombing",
+    "bombings", "bombed", "explosion", "explosions", "ied", "missile strike",
+    "casualty", "casualties", "invasion", "military operation", "insurgent",
+    "insurgents",
+    # 血腥 / 医疗
+    "blood", "bloody", "gore", "gory", "injury", "injuries", "injured", "wound",
+    "wounds", "wounded", "surgery", "surgical", "autopsy", "amputation",
+    # 执法 / 监控
+    "dashcam", "dash cam", "bodycam", "body cam", "body camera", "body worn",
+    "body worn camera", "police dashcam", "police bodycam", "police footage",
+    "police video", "critical incident", "officer involved", "surveillance",
+    "cctv", "security camera", "security footage", "arrest", "arrested",
+    "inmate", "inmates", "prisoner", "prisoners", "shackles", "shackled", "handcuffed",
+    # 骚乱 / 恐怖主义
+    "riot", "riots", "rioting", "rioters", "terrorism", "terrorist", "terrorists",
+    "terror attack", "hostage", "tear gas",
+    # 虐待 / 性内容
+    "abuse", "abused", "child abuse", "torture", "nudity", "nude", "nudes", "naked",
+    "topless", "sexual", "sex", "porn", "porno", "pornography", "pornographic",
+    "erotic", "erotica", "masturbation", "genitals", "genitalia",
+    # 自残
+    "suicide", "suicides", "self harm", "hanged", "noose", "hanging",
+    # 动物残忍
+    "animal cruelty", "cruelty", "slaughter", "slaughtered", "slaughterhouse",
+    "abattoir", "bullfight", "bullfighting", "dogfight", "dogfighting", "cockfight",
+    "cockfighting", "roadkill", "carcass", "carcasses", "poaching",
+    # 灾难受害者
+    "victim", "victims", "disaster victims", "refugee camp", "famine", "starvation",
+)
+DEFAULT_ALLOWED_PHRASES: tuple[str, ...] = (
+    "crashing waves", "waves crashing", "wave crashing", "waves crash", "wave crash",
+    "crash of waves", "crash of the waves", "surf crash",
+    "dead sea", "dead end", "dead leaves", "dead leaf", "dead tree", "dead trees",
+    "dead wood", "dead calm", "death valley",
+    "shooting star", "shooting stars", "photo shooting", "film shooting",
+    "killer whale", "killer whales",
+    "hanging bridge", "hanging garden", "hanging gardens", "hanging lamp",
+    "hanging lamps", "hanging light", "hanging lights", "hanging plant",
+    "hanging plants", "hanging basket", "hanging valley", "hanging glacier",
+    "star wars", "pillow fight", "snowball fight", "food fight",
+    "blood moon", "blood orange", "blood oranges",
+)
+
+_NORMALIZE_SEPARATORS = re.compile(r"[_\-–—/]+")
+
+
+def _normalize_text(value: str) -> str:
+    text = strip_html(value).lower()
+    text = _NORMALIZE_SEPARATORS.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _phrase_pattern(phrases: Iterable[str]) -> re.Pattern | None:
+    cleaned = sorted(
+        {_normalize_text(str(p)) for p in phrases if isinstance(p, str) and p.strip()},
+        key=len,
+        reverse=True,
+    )
+    cleaned = [p for p in cleaned if p]
+    if not cleaned:
+        return None
+    body = "|".join(re.escape(p).replace(r"\ ", r"\s+") for p in cleaned)
+    return re.compile(rf"(?<![^\W_])(?:{body})(?![^\W_])")
+
+
+class ContentFilter:
+    """按整词匹配拒绝敏感素材；``extra_*`` 用于在默认表之外追加词条。"""
+
+    def __init__(
+        self,
+        extra_blocked_terms: Iterable[str] = (),
+        extra_allowed_phrases: Iterable[str] = (),
+    ):
+        self.blocked_terms = tuple(DEFAULT_BLOCKED_TERMS) + tuple(
+            t for t in extra_blocked_terms or () if isinstance(t, str) and t.strip()
+        )
+        self.allowed_phrases = tuple(DEFAULT_ALLOWED_PHRASES) + tuple(
+            t for t in extra_allowed_phrases or () if isinstance(t, str) and t.strip()
+        )
+        self._blocked = _phrase_pattern(self.blocked_terms)
+        self._allowed = _phrase_pattern(self.allowed_phrases)
+
+    @property
+    def signature(self) -> str:
+        """词表指纹：写入搜索缓存键，修改词表后旧缓存自动失效。"""
+        digest = hashlib.sha256(
+            "\n".join(
+                sorted(_normalize_text(t) for t in self.blocked_terms)
+                + ["--"]
+                + sorted(_normalize_text(t) for t in self.allowed_phrases)
+            ).encode("utf-8")
+        )
+        return digest.hexdigest()[:10]
+
+    def match(self, *texts: str) -> str | None:
+        """返回首个命中的敏感词；全部通过时返回 ``None``。"""
+        if self._blocked is None:
+            return None
+        for text in texts:
+            normalized = _normalize_text(text or "")
+            if not normalized:
+                continue
+            if self._allowed is not None:
+                normalized = self._allowed.sub(" | ", normalized)
+            hit = self._blocked.search(normalized)
+            if hit:
+                return hit.group(0)
+        return None
+
+
+
+def _title_text(title: str) -> str:
+    text = re.sub(r"^file:", "", title or "", flags=re.IGNORECASE)
+    return re.sub(r"\.(webm|ogv|ogg|mp4|mpg|mpeg|mov)$", "", text, flags=re.IGNORECASE)
 
 
 def _meta_value(extmetadata: Any, key: str) -> str:
@@ -242,7 +401,8 @@ def build_search_params(search_term: str) -> dict:
         "prop": "videoinfo",
         "viprop": "url|size|mime|dimensions|extmetadata|derivatives",
         "viextmetadatafilter": (
-            "LicenseShortName|License|LicenseUrl|Artist|Credit|ObjectName|NonFree"
+            "LicenseShortName|License|LicenseUrl|Artist|Credit|ObjectName|NonFree|"
+            "ImageDescription|Categories"
         ),
     }
 
@@ -253,7 +413,9 @@ def parse_search_response(
     minimum_duration: int,
     aspect: VideoAspect,
     max_bytes: int,
+    content_filter: ContentFilter | None = None,
 ) -> list[MaterialInfo]:
+    content_filter = content_filter or DEFAULT_CONTENT_FILTER
     if not isinstance(payload, dict):
         return []
     query = payload.get("query")
@@ -288,11 +450,28 @@ def parse_search_response(
         )
         if not license_name:
             continue
+        title = str(page.get("title") or "")
+        categories = _meta_value(meta, "Categories").replace("|", " | ")
+        page_categories = page.get("categories")
+        if isinstance(page_categories, list):
+            categories += " | " + " | ".join(
+                str(c.get("title") or "") for c in page_categories if isinstance(c, dict)
+            )
+        blocked = content_filter.match(
+            _title_text(title),
+            _meta_value(meta, "ObjectName"),
+            _meta_value(meta, "ImageDescription"),
+            categories,
+        )
+        if blocked:
+            logger.info(
+                f"wikimedia commons: skipped sensitive file {title!r} (matched {blocked!r})"
+            )
+            continue
         rendition = pick_rendition(info, float(duration), aspect, max_bytes)
         if not rendition:
             continue
 
-        title = str(page.get("title") or "")
         display_title = strip_html(_meta_value(meta, "ObjectName")) or re.sub(
             r"^File:", "", title
         )
@@ -336,6 +515,7 @@ def search_videos(
     max_bytes: int,
     proxies: Any = None,
     verify: bool = True,
+    content_filter: ContentFilter | None = None,
 ) -> list[MaterialInfo]:
     aspect = VideoAspect(video_aspect)
     response = http_get(
@@ -349,7 +529,7 @@ def search_videos(
     )
     response.raise_for_status()
     return parse_search_response(
-        response.json(), search_term, minimum_duration, aspect, max_bytes
+        response.json(), search_term, minimum_duration, aspect, max_bytes, content_filter
     )
 
 
@@ -383,3 +563,7 @@ def credit_lines(records: Iterable[dict]) -> list[str]:
 def render_credits(lines: list[str]) -> str:
     header = "Video material credits (Wikimedia Commons)\n" + "=" * 42 + "\n"
     return header + "\n".join(f"- {line}" for line in lines) + "\n"
+
+
+# 依赖 strip_html，需在模块末尾构造。
+DEFAULT_CONTENT_FILTER = ContentFilter()

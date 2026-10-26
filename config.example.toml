@@ -110,6 +110,16 @@ pixabay_api_keys = []
 enable_wikimedia_fallback = true
 # Fallback triggers when the primary source returns fewer clips than this.
 # wikimedia_fallback_min_results = 5
+# Commons also hosts news, archive and law-enforcement footage (crashes, war,
+# police bodycam, etc.). Files whose title, description or categories match a
+# built-in list of graphic/sensitive terms are skipped (whole-word matching, so
+# "deadline" or "crashing waves" still pass). Add your own terms here; they are
+# appended to the built-in list. Phrases in wikimedia_allowed_phrases are ignored
+# by the filter (use them to fix false positives, e.g. "dead sea").
+# 标题、描述或分类命中敏感词（事故、死亡、战争、执法记录、色情等）的 Commons
+# 文件会被跳过；以下两项用于追加屏蔽词和放行短语。
+wikimedia_blocked_terms = []
+# wikimedia_allowed_phrases = ["dead sea"]
 
 # Register at https://coverr.co/developers?ctx=header_navigation
 coverr_api_keys = []

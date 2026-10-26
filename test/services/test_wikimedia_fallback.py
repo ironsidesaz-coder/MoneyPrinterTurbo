@@ -90,6 +90,8 @@ def _page(
     size=5_000_000,
     derivatives=None,
     artist='<a href="//commons.wikimedia.org/wiki/User:Jane">Jane Doe</a>',
+    description="",
+    categories="",
 ):
     name = title.replace(" ", "_")
     info = {
@@ -106,6 +108,8 @@ def _page(
             "Artist": {"value": artist},
             "Credit": {"value": "<span>Own work</span>"},
             "ObjectName": {"value": title.rsplit(".", 1)[0]},
+            "ImageDescription": {"value": description},
+            "Categories": {"value": categories},
         },
     }
     if duration is not None:
@@ -246,7 +250,7 @@ def test_fallback_triggers_when_primary_returns_too_few(fallback_items):
         "https://videos.pexels.com/1.mp4",
         f"{UPLOAD}/a/aa/Good.webm",
     ]
-    assert search.call_args.kwargs["provider"] == "wikimedia"
+    assert search.call_args.kwargs["provider"].startswith("wikimedia-cf")
     assert search.call_args.kwargs["search_videos"] is material.search_videos_wikimedia
 
 
@@ -373,3 +377,147 @@ def test_cache_round_trip_keeps_license_fields():
     assert cached["license"] == "CC BY 4.0"
     assert cached["title"] == "Clip"
     assert cached["license_url"] == "https://creativecommons.org/licenses/by/4.0"
+
+
+# ---------------------------------------------------------------------------
+# 内容过滤
+# ---------------------------------------------------------------------------
+
+
+def test_search_requests_description_and_categories_metadata():
+    params = wikimedia_commons.build_search_params("ocean")
+    fields = params["viextmetadatafilter"].split("|")
+    assert "ImageDescription" in fields
+    assert "Categories" in fields
+
+
+def test_parse_blocks_sensitive_title_description_and_category():
+    payload = _payload(
+        _page(1, "Pedestrian killed in Hit and Run Traffic Collision NR24121kt.webm",
+              short="Public domain", template="pd"),
+        _page(2, "Intersection NR24121.webm",
+              description="<p>LAPD releases <b>dashcam</b> video of the incident</p>"),
+        _page(3, "Street scene 2024.webm",
+              categories="Los Angeles Police Department|Videos of traffic collisions"),
+        _page(4, "Ocean waves.webm", categories="Waves|Videos of beaches"),
+        _page(5, "City skyline timelapse.webm", description="Sunset over downtown"),
+    )
+
+    items = _parse(payload)
+
+    assert [item.source_info["title"] for item in items] == [
+        "Ocean waves",
+        "City skyline timelapse",
+    ]
+
+
+def test_parse_also_checks_prop_categories_list():
+    page = _page(1, "Street scene.webm")
+    page["categories"] = [{"ns": 14, "title": "Category:Riots in 2020"}]
+
+    assert _parse(_payload(page)) == []
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Fatal Hit-and-Run Traffic Collision July 8, 2024",
+        "Car crash on highway",
+        "World War II combat footage",
+        "Police bodycam footage",
+        "CCTV_footage_of_a_robbery",
+        "Bomb explosion aftermath",
+        "Surgery in operating room",
+        "Nude beach",
+        "Slaughterhouse conditions",
+        "Earthquake victims rescue",
+        "Corpse found",
+        "Riot in the streets",
+        "Inmate walking in shackles",
+        "Protesters hit with tear gas",
+    ],
+)
+def test_filter_blocks_sensitive_text(text):
+    assert wikimedia_commons.DEFAULT_CONTENT_FILTER.match(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Ocean waves",
+        "Waves crashing on the rocks",
+        "Big wave crash at Nazaré",
+        "City skyline timelapse",
+        "Meeting the deadline at the office",
+        "People walking in Shibuya",
+        "Nature forest in autumn",
+        "Dead Sea shoreline",
+        "Shooting stars over the desert",
+        "Killer whale breaching",
+        "Warsaw old town",
+        "Bodyboarding at sunset",
+        "Skillful juggler",
+        "Body of water at dawn",
+    ],
+)
+def test_filter_allows_benign_text(text):
+    assert wikimedia_commons.DEFAULT_CONTENT_FILTER.match(text) is None
+
+
+def test_filter_extra_terms_and_allowed_phrases_extend_defaults():
+    custom = wikimedia_commons.ContentFilter(
+        extra_blocked_terms=["fireworks", "  "], extra_allowed_phrases=["hanging out"]
+    )
+
+    assert custom.match("New year fireworks") == "fireworks"
+    assert custom.match("Friends hanging out at the park") is None
+    assert custom.match("Car crash") == "car crash"  # 默认词表仍生效
+    assert custom.signature != wikimedia_commons.DEFAULT_CONTENT_FILTER.signature
+
+
+def test_filter_allowed_phrase_fixes_surname_false_positive():
+    custom = wikimedia_commons.ContentFilter(extra_allowed_phrases=["Jason Slaughter"])
+
+    assert wikimedia_commons.DEFAULT_CONTENT_FILTER.match("Video by Jason Slaughter")
+    assert custom.match("Video by Jason Slaughter") is None
+    assert custom.match("Cattle slaughter") == "slaughter"
+
+
+def test_config_blocked_terms_reach_search_and_cache_key():
+    payload = _payload(_page(1, "Ocean waves.webm"), _page(2, "Lighthouse.webm"))
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return payload
+
+    with patch.dict(config.app, {"wikimedia_blocked_terms": ["lighthouse"]}):
+        filt = material._wikimedia_content_filter()
+        items = wikimedia_commons.search_videos(
+            "ocean", 5, VideoAspect.landscape,
+            http_get=lambda url, **kw: FakeResponse(), max_bytes=10**9,
+            content_filter=filt,
+        )
+
+    assert [item.source_info["title"] for item in items] == ["Ocean waves"]
+    assert filt.signature != wikimedia_commons.DEFAULT_CONTENT_FILTER.signature
+
+
+def test_fallback_rechecks_cached_titles_against_blocklist():
+    cached = [
+        _item("wikimedia", f"{UPLOAD}/a/aa/Crash.webm", "Public domain"),
+        _item("wikimedia", f"{UPLOAD}/b/bb/Waves.webm", "CC BY 4.0"),
+    ]
+    cached[0].source_info["title"] = "Fatal Hit-and-Run Traffic Collision July 8, 2024"
+    cached[1].source_info["title"] = "Ocean waves"
+
+    with (
+        patch.dict(config.app, {"enable_wikimedia_fallback": True,
+                                "wikimedia_fallback_min_results": 3}),
+        patch.object(material, "_search_videos_with_cache", return_value=cached),
+    ):
+        result = material._with_wikimedia_fallback("pexels", [], "city", 5, VideoAspect.landscape)
+
+    assert [item.source_info["title"] for item in result] == ["Ocean waves"]

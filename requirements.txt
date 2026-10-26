@@ -1,7 +1,15 @@
 # Keep legacy pip install support; primary deps moved to pyproject.toml / uv.lock.
-moviepy==2.2.1
-streamlit==1.59.1
-starlette==1.2.1
+# moviepy 2.2.1 caps pillow<12, but every pillow below 13.0.0 has known CVEs.
+# moviepy is installed separately with --no-deps from requirements-nodeps.txt;
+# its runtime dependencies are listed here so pip still installs them.
+pillow==13.0.0
+decorator==5.2.1
+imageio==2.37.3
+numpy==2.4.4
+proglog==0.1.12
+python-dotenv==1.2.2
+streamlit==1.66.1
+starlette==1.10.0
 streamlit-tour==1.1.0
 edge_tts==7.3.1
 fastapi==0.136.3
@@ -17,11 +25,11 @@ google-genai==2.11.0
 dashscope==1.20.14
 azure-cognitiveservices-speech==1.41.1
 redis==5.2.0
-python-multipart==0.0.27
+python-multipart==0.0.32
 pyyaml==6.0.3
 requests==2.33.1
 packaging==24.2
 socksio==1.0.0
 pydub==0.25.1
 audioop-lts==0.2.2; python_version >= "3.13"
-litellm==1.86.2
+litellm==1.88.6

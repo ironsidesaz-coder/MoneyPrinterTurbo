@@ -134,7 +134,7 @@ LOOMLOOM_MAX_POLL_FAILURES = 5
 # 火山引擎、无限星河排列；其余服务随后展示。这样两个入口的顺序一致，同时
 # 不改变 config.toml、历史任务和 API 请求中的字段语义，旧用户无需迁移配置。
 VIDEO_SOURCE_GROUPS = {
-    "stock_video": ("pexels", "pixabay", "coverr"),
+    "stock_video": ("pexels", "pixabay", "coverr", "vecteezy"),
     "ai_video": (
         "metaso_minimax",
         "ofox",
@@ -3715,6 +3715,22 @@ def _render_settings_dialog():
                 )
                 _save_material_api_keys("coverr_api_keys", coverr_api_key)
 
+                vecteezy_api_key = st.text_input(
+                    tr("Vecteezy API Key"),
+                    value=_get_material_api_keys("vecteezy_api_keys"),
+                    type="password",
+                    key="vecteezy_api_keys_input",
+                    help=tr("Vecteezy API Key Help"),
+                )
+                _save_material_api_keys("vecteezy_api_keys", vecteezy_api_key)
+                vecteezy_account_id = st.text_input(
+                    tr("Vecteezy Account ID"),
+                    value=str(config.app.get("vecteezy_account_id", "") or ""),
+                    key="vecteezy_account_id_input",
+                ).strip()
+                if vecteezy_account_id != str(config.app.get("vecteezy_account_id", "") or ""):
+                    _set_runtime_config("app", "vecteezy_account_id", vecteezy_account_id)
+
             with st.container(border=True):
                 st.markdown(f"#### {tr('AI Video Generation APIs')}")
                 st.caption(tr("AI Video Generation APIs Help"))
@@ -5262,6 +5278,7 @@ def _render_video_settings(panel, params):
                 "pexels": tr("Pexels"),
                 "pixabay": tr("Pixabay"),
                 "coverr": tr("Coverr"),
+                "vecteezy": tr("Vecteezy"),
                 "wavespeed": tr("WaveSpeed AI Video"),
                 "volcengine_seedance": tr("Volcano Engine Seedance"),
                 "infistar": tr("Infistar AI Video"),
@@ -5587,7 +5604,7 @@ def _render_video_settings(panel, params):
                 _set_runtime_config("app", "video_codec", selected_video_codec)
 
             concurrency_options = [1, 2, 4, 6, 8]
-            if params.video_source in {"pexels", "pixabay", "coverr"}:
+            if params.video_source in {"pexels", "pixabay", "coverr", "vecteezy"}:
                 selected_material_concurrency = stable_selectbox(
                     tr("Material Concurrency"),
                     options=concurrency_options,
@@ -8226,6 +8243,7 @@ def _render_generation_controls(
             "pexels",
             "pixabay",
             "coverr",
+            "vecteezy",
             "wavespeed",
             "volcengine_seedance",
             "ofox",
@@ -8258,6 +8276,13 @@ def _render_generation_controls(
         ):
             _remove_active_generation_task(task_id)
             st.error(tr("Please Enter the Coverr API Key"))
+            st.stop()
+
+        if params.video_source == "vecteezy" and not config.app.get(
+            "vecteezy_api_keys", ""
+        ):
+            _remove_active_generation_task(task_id)
+            st.error(tr("Please Enter the Vecteezy API Key"))
             st.stop()
 
         if params.video_source == "wavespeed" and not config.app.get(

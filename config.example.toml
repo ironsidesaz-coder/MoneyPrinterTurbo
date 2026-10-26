@@ -74,7 +74,7 @@ tls_verify = true
 # Video Materials / 视频素材
 # -----------------------------------------------------------------------------
 
-# Available values: "pexels", "pixabay", "coverr", "wavespeed",
+# Available values: "pexels", "pixabay", "coverr", "vecteezy", "wavespeed",
 # "volcengine_seedance", "ofox", "metaso_minimax", "muapi", "loomloom",
 # "openai_image", "infistar", "local".
 # "wavespeed" generates brand-new clips with WaveSpeed AI text-to-video models
@@ -99,7 +99,7 @@ pexels_api_keys = []
 # Register at https://pixabay.com/api/docs/
 pixabay_api_keys = []
 
-# When Pexels or Pixabay returns too few clips for a search term, fill the gap
+# When Pexels, Pixabay or Vecteezy returns too few clips for a search term, fill the gap
 # with videos from Wikimedia Commons (public MediaWiki API, no key needed).
 # Only public domain, CC0 and CC BY licensed files are used; CC BY-SA, NC, ND,
 # fair-use and unknown licenses are rejected. Attribution for every Commons
@@ -123,6 +123,42 @@ wikimedia_blocked_terms = []
 
 # Register at https://coverr.co/developers?ctx=header_navigation
 coverr_api_keys = []
+
+# Vecteezy stock videos. Create an API account at
+# https://www.vecteezy.com/developers and paste the Bearer token here.
+# Vecteezy 免费 API 账户每月最多 500 次下载，免费授权素材必须署名，
+# 未使用的下载文件须在 30 天内删除。
+#
+# Plans and costs (check the developers page for current terms):
+# - Free: API calls and downloads are free, max 500 downloads per month, free
+#   content only. Search results do not include dimensions/tags on this plan,
+#   so clip orientation is verified after download (wrong-orientation clips are
+#   deleted but still count as a download).
+# - Pay-As-You-Go: $0.002 per API call and $1.00 per download (every download).
+# Licence (https://www.vecteezy.com/licensing-agreement): Free License content
+# requires attribution: add "Vecteezy.com" to the final credits of the video,
+# and online link "Stock Videos by Vecteezy" to the clip's attribution URL.
+# Every Vecteezy clip used is listed in credits.txt next to the final video.
+# Free License limits: individual user, no resale/merch/logos/NFTs, production
+# budgets up to $1,000. Only commercial (not editorial) content is searched.
+# 30-day rule: Vecteezy forbids stockpiling. Downloaded files you do not use in
+# a project must be deleted within 30 days, so clean storage/cache_videos (or
+# your material_directory) at least monthly.
+# The Wikimedia blocklist above (wikimedia_blocked_terms / allowed phrases) is
+# also applied to Vecteezy titles and tags. Search results are never cached on
+# disk (Vecteezy asks clients to use fresh results).
+vecteezy_api_keys = []
+# Optional. Numeric API account id; uses the V2 endpoints
+# (/v2/{account_id}/...). Leave empty to use the V1 endpoints.
+vecteezy_account_id = ""
+# Safety switch, default false. Before every search and download the account
+# quota is read from /account/info (free call). While false, a download is
+# refused once the no-overage download allowance (500/month on the free plan)
+# is used up or the quota cannot be read, so no download is billed ($1.00 each)
+# by accident. Searches are only refused when the account reports a positive
+# call cap that is used up; free accounts report no cap. On Pay-As-You-Go each
+# search still costs $0.002. Set true only if you accept paid downloads.
+vecteezy_allow_paid_downloads = false
 
 # WaveSpeed AI generates clips from your script keywords with text-to-video
 # models. Create an API key at https://wavespeed.ai

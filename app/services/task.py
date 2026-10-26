@@ -97,7 +97,7 @@ _VIDEO_MUSIC_PROVIDERS = {
 
 
 _SUPPORTED_VIDEO_SOURCES = frozenset({
-    "pexels", "pixabay", "coverr", "local", "wavespeed",
+    "pexels", "pixabay", "coverr", "vecteezy", "local", "wavespeed",
     "volcengine_seedance", "ofox", "metaso_minimax", "muapi",
     "loomloom", "openai_image", "infistar", "jalapeno",
 })
@@ -1010,7 +1010,7 @@ def generate_final_videos(
             warnings=warnings,
         )
     allocate_batch_materials = params.video_count > 1 and params.video_source in {
-        "pexels", "pixabay", "coverr", "local"
+        "pexels", "pixabay", "coverr", "vecteezy", "local"
     }
     source_usage = {}
     material_selections = []

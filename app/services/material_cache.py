@@ -38,6 +38,11 @@ _CACHE_LOCKS = tuple(threading.Lock() for _ in range(256))
 _cleanup_state_lock = threading.Lock()
 _last_cleanup_monotonic: float | None = None
 
+# Providers whose search results must never be written to the disk cache:
+# - coverr: download URLs are signed JWTs bound to the API key.
+# - vecteezy: the API terms ask clients not to store result/preview URLs and to
+#   use fresh search results.
+UNCACHED_PROVIDERS = frozenset({"coverr", "vecteezy"})
 
 def _safe_public_url(value) -> str | None:
     """移除公开页面 URL 的查询参数和用户凭据，避免缓存意外保存 token。"""
@@ -224,7 +229,7 @@ def load_material_search_cache(
     ``None`` 表示缓存未命中，需要请求远端 API；空列表不作为有效缓存返回，
     避免网络错误或上游异常被误缓存后持续阻断后续任务。
     """
-    if str(provider).strip().lower() == "coverr":
+    if str(provider).strip().lower() in UNCACHED_PROVIDERS:
         # Coverr 的下载地址包含绑定 API Key 的签名 JWT。它只用于当前请求，
         # 不能进入磁盘缓存；查询相同条件时顺带删除旧版本可能留下的缓存。
         try:
@@ -348,7 +353,7 @@ def save_material_search_cache(
     ``os.replace`` 发布，可以保证读进程只会看到完整旧文件或完整新文件；
     即使两个写进程同时完成，最终内容也都是同一缓存键对应的合法结果。
     """
-    if str(provider).strip().lower() == "coverr":
+    if str(provider).strip().lower() in UNCACHED_PROVIDERS:
         return False
 
     temp_path = None

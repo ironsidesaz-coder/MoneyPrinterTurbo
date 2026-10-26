@@ -5,6 +5,7 @@ import json
 import math
 import os
 import random
+import re
 import tempfile
 import threading
 import time
@@ -32,6 +33,7 @@ from app.services import (
     muapi,
     ofox,
     task_artifacts,
+    vecteezy,
     video,
     volcengine_seedance,
     wikimedia_commons,
@@ -171,6 +173,62 @@ def _material_source_record(item: MaterialInfo, local_path: str) -> dict[str, An
 ATTRIBUTION_FIELDS = ("title", "license", "license_url", "credit")
 
 
+COVERR_ATTRIBUTION_URL = "https://coverr.co"
+
+
+def _coverr_credit_lines(records: list[dict[str, Any]]) -> list[str]:
+    """Coverr's API terms ask apps to credit Coverr for every API video used."""
+    lines: list[str] = []
+    for record in records or []:
+        if not isinstance(record, dict) or record.get("provider") != "coverr":
+            continue
+        title = record.get("title") or (
+            f"Coverr video {record['asset_id']}" if record.get("asset_id") else "Coverr video"
+        )
+        parts = [f'"{title}"']
+        creator = record.get("creator") if isinstance(record.get("creator"), dict) else {}
+        if creator.get("name"):
+            parts[0] += f" by {creator['name']}"
+        parts.append(f"Video from Coverr: {COVERR_ATTRIBUTION_URL}")
+        if record.get("source_page"):
+            parts.append(str(record["source_page"]))
+        line = " | ".join(parts)
+        if line not in lines:
+            lines.append(line)
+    return lines
+
+
+def _material_credit_sections(
+    material_sources: list[dict[str, Any]],
+) -> list[tuple[str, list[str]]]:
+    """(provider label, attribution lines) for every provider that needs credits."""
+    sections = [
+        ("Wikimedia Commons", wikimedia_commons.credit_lines(material_sources)),
+        ("Vecteezy", vecteezy.credit_lines(material_sources)),
+        ("Coverr", _coverr_credit_lines(material_sources)),
+    ]
+    return [(label, lines) for label, lines in sections if lines]
+
+
+def _material_credit_lines(material_sources: list[dict[str, Any]]) -> list[str]:
+    return [line for _, lines in _material_credit_sections(material_sources) for line in lines]
+
+
+def _render_material_credits(material_sources: list[dict[str, Any]]) -> str:
+    rendered = []
+    for label, lines in _material_credit_sections(material_sources):
+        if label == "Wikimedia Commons":
+            rendered.append(wikimedia_commons.render_credits(lines))
+            continue
+        header = f"Video material credits ({label})"
+        note = f"{vecteezy.CREDITS_NOTE}\n" if label == "Vecteezy" else ""
+        rendered.append(
+            header + "\n" + "=" * len(header) + "\n" + note
+            + "\n".join(f"- {line}" for line in lines) + "\n"
+        )
+    return "\n".join(rendered)
+
+
 def _write_material_credits(task_id: str, material_sources: list[dict[str, Any]]) -> None:
     """
     使用了需要署名的素材（Wikimedia Commons）时，在任务目录写入 credits.txt。
@@ -178,13 +236,13 @@ def _write_material_credits(task_id: str, material_sources: list[dict[str, Any]]
     与成片 ``final-*.mp4`` 位于同一目录。没有此类素材时不创建任务目录也不写文件，
     保持其他素材源的既有行为不变。
     """
-    lines = wikimedia_commons.credit_lines(material_sources)
+    lines = _material_credit_lines(material_sources)
     if not lines:
         return
     try:
         target = Path(utils.task_dir(task_id)) / wikimedia_commons.CREDITS_FILENAME
         temp = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
-        temp.write_text(wikimedia_commons.render_credits(lines), encoding="utf-8")
+        temp.write_text(_render_material_credits(material_sources), encoding="utf-8")
         os.replace(temp, target)
     except Exception as exc:
         logger.warning(
@@ -203,7 +261,7 @@ def read_material_credits(task_id: str) -> list[str]:
         records = payload.get("material_sources") if isinstance(payload, dict) else None
         if not isinstance(records, list):
             return []
-        return wikimedia_commons.credit_lines(records)
+        return _material_credit_lines(records)
     except Exception as exc:
         logger.warning(
             f"failed to read material credits: task_id={task_id}, "
@@ -538,7 +596,7 @@ def search_videos_wikimedia(
     return []
 
 
-WIKIMEDIA_FALLBACK_PROVIDERS = frozenset({"pexels", "pixabay"})
+WIKIMEDIA_FALLBACK_PROVIDERS = frozenset({"pexels", "pixabay", "vecteezy"})
 _DEFAULT_WIKIMEDIA_FALLBACK_MIN_RESULTS = 5
 
 
@@ -782,6 +840,13 @@ def search_videos_pixabay(
     return []
 
 
+def _coverr_page_url(slug: Any) -> str:
+    """Public Coverr page for attribution; search hits only carry the slug."""
+    if isinstance(slug, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,200}", slug):
+        return f"https://coverr.co/videos/{slug}"
+    return ""
+
+
 def search_videos_coverr(
     search_term: str,
     minimum_duration: int,
@@ -879,7 +944,9 @@ def search_videos_coverr(
                 "provider": "coverr",
                 "search_term": search_term,
                 "asset_id": str(video_id),
-                "source_page": _safe_public_url(v.get("canonical_url") or v.get("url")),
+                "title": str(v.get("title") or "").strip()[:300],
+                "source_page": _safe_public_url(v.get("canonical_url") or v.get("url"))
+                or _coverr_page_url(v.get("slug")),
                 "creator": _creator_info(v.get("creator") or v.get("author")),
                 "rendition": {
                     "id": "mp4_download",
@@ -896,6 +963,231 @@ def search_videos_coverr(
         )
 
     return []
+
+
+def _vecteezy_allow_paid() -> bool:
+    """``vecteezy_allow_paid_downloads``: default false, only explicit truthy values enable it."""
+    value = config.app.get("vecteezy_allow_paid_downloads", False)
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return value is True
+
+
+def _vecteezy_api_prefix() -> str:
+    return vecteezy.api_prefix(config.app.get("vecteezy_account_id", ""))
+
+
+def _vecteezy_get_json(url: str, api_key: str, params: dict | None = None) -> Any:
+    """GET a Vecteezy API endpoint with Bearer auth; raise readable, key-free errors."""
+    kwargs: dict[str, Any] = {
+        "headers": {
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+        },
+        "proxies": config.proxy,
+        "verify": _get_tls_verify(),
+        "timeout": (30, 60),
+    }
+    if params:
+        kwargs["params"] = params
+    response = trace_http_call("GET", requests.get, url, **kwargs)
+    status = getattr(response, "status_code", 200)
+    if status == 401:
+        raise PermissionError("vecteezy rejected the API key (HTTP 401)")
+    if status == 402:
+        raise vecteezy.VecteezyQuotaError("vecteezy quota exceeded (HTTP 402)")
+    if status == 429:
+        raise RuntimeError("vecteezy rate limit reached (HTTP 429)")
+    if status >= 400:
+        raise RuntimeError(f"vecteezy request failed (HTTP {status})")
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise ValueError("vecteezy returned a non-JSON response") from exc
+
+
+def _vecteezy_account_info(api_key: str) -> Any:
+    # Documented as not counting against any quota.
+    return _vecteezy_get_json(f"{_vecteezy_api_prefix()}/account/info", api_key)
+
+
+def search_videos_vecteezy(
+    search_term: str,
+    minimum_duration: int,
+    video_aspect: VideoAspect = VideoAspect.portrait,
+) -> List[MaterialInfo]:
+    """
+    Vecteezy (https://www.vecteezy.com/developers) stock videos.
+
+    Search results only carry a stable ``vecteezy:resource/<id>`` reference.
+    The signed download URL is requested lazily by ``_save_vecteezy_video``
+    for clips that are actually used, because each download counts against
+    the download quota (free: 500/month; Pay-As-You-Go: $1.00 each). See
+    ``app/services/vecteezy.py`` for the licence and quota rules.
+    """
+    aspect = VideoAspect(video_aspect)
+    api_key = get_api_key("vecteezy_api_keys")
+    allow_paid = _vecteezy_allow_paid()
+    logger.info(f"searching videos on vecteezy: term={search_term!r}")
+    try:
+        with vecteezy.quota_lock():
+            vecteezy.ensure_quota(
+                lambda: _vecteezy_account_info(api_key), "general", allow_paid
+            )
+            payload = _vecteezy_get_json(
+                f"{_vecteezy_api_prefix()}/resources",
+                api_key,
+                params=vecteezy.build_search_params(search_term, minimum_duration),
+            )
+        if not isinstance(payload, dict) or not isinstance(payload.get("resources"), list):
+            logger.error("vecteezy video search returned an unsupported response")
+            return []
+
+        def matches(width: int, height: int) -> bool:
+            # Square output crops any source, matching the Coverr behaviour.
+            return aspect == VideoAspect.square or _matches_video_aspect(width, height, aspect)
+
+        candidates = vecteezy.parse_search_response(
+            payload,
+            search_term,
+            minimum_duration,
+            matches,
+            _wikimedia_content_filter(),
+        )
+        video_items: List[MaterialInfo] = []
+        for candidate in candidates:
+            item = MaterialInfo()
+            item.provider = vecteezy.PROVIDER
+            item.url = vecteezy.reference(candidate["resource_id"])
+            item.duration = candidate["duration"]
+            item.source_info = {
+                "provider": vecteezy.PROVIDER,
+                "search_term": search_term,
+                "asset_id": str(candidate["resource_id"]),
+                "title": candidate["title"],
+                "file_type": candidate["file_type"],
+                "target_aspect": aspect.value,
+                "rendition": {
+                    "id": candidate["file_type"],
+                    "width": candidate["width"],
+                    "height": candidate["height"],
+                },
+            }
+            video_items.append(item)
+        return video_items
+    except vecteezy.VecteezyQuotaError as e:
+        logger.warning(f"vecteezy search skipped: {e}")
+    except Exception as e:
+        logger.error(
+            "vecteezy video search failed: "
+            f"error={type(e).__name__}, detail={_redact_request_error(e, api_key)}"
+        )
+    return []
+
+
+def _probe_video_size(video_path: str) -> tuple[int, int, float]:
+    clip = None
+    try:
+        clip = VideoFileClip(video_path)
+        width, height = clip.size
+        return int(width), int(height), float(clip.duration or 0)
+    finally:
+        if clip is not None:
+            try:
+                clip.close()
+            except Exception:
+                pass
+
+
+def _is_vecteezy_item(item: MaterialInfo) -> bool:
+    return vecteezy.is_reference(getattr(item, "url", ""))
+
+
+def _save_vecteezy_video(item: MaterialInfo, save_dir: str = "") -> str:
+    """
+    Resolve a ``vecteezy:resource/<id>`` reference and download the file.
+
+    A clip already in the local cache is reused without any API call. Otherwise
+    the quota is checked first (fail closed unless paid downloads are allowed),
+    then one download URL is requested and fetched. Attribution data from the
+    download response is stored on ``item.source_info`` for ``credits.txt``.
+    """
+    resource_id = vecteezy.resource_id_from_reference(item.url)
+    cache_dir = save_dir or utils.storage_dir("cache_videos")
+    source = dict(item.source_info) if isinstance(item.source_info, dict) else {}
+    title = str(source.get("title") or "")
+
+    _, cached_path = _cached_video_path(item.url, cache_dir)
+    if os.path.exists(cached_path) and os.path.getsize(cached_path) > 0:
+        logger.info(f"vecteezy clip already cached: {cached_path}")
+        # The original download response is not kept; attribute conservatively.
+        source.update(vecteezy.attribution_fields(title, {"requires_attribution": True}))
+        item.source_info = source
+        return cached_path
+
+    api_key = get_api_key("vecteezy_api_keys")
+    allow_paid = _vecteezy_allow_paid()
+    file_type = str(source.get("file_type") or "mp4")
+    try:
+        with vecteezy.quota_lock():
+            vecteezy.ensure_quota(
+                lambda: _vecteezy_account_info(api_key), "download", allow_paid
+            )
+            payload = _vecteezy_get_json(
+                f"{_vecteezy_api_prefix()}/resources/{resource_id}/download",
+                api_key,
+                params={"file_type": file_type},
+            )
+        download = vecteezy.parse_download_response(payload)
+    except vecteezy.VecteezyQuotaError as e:
+        logger.warning(f"vecteezy download skipped: id={resource_id}, {e}")
+        return ""
+    except Exception as e:
+        logger.error(
+            "vecteezy download request failed: "
+            f"id={resource_id}, error={type(e).__name__}, "
+            f"detail={_redact_request_error(e, api_key)}"
+        )
+        return ""
+
+    # The signed URL is used once and never stored (it expires after 24 h).
+    saved_path = save_video(download["url"], cache_dir, cache_key=item.url)
+    if not saved_path:
+        return ""
+
+    target_aspect = source.get("target_aspect")
+    try:
+        width, height, duration = _probe_video_size(saved_path)
+    except Exception as e:
+        logger.warning(
+            f"vecteezy clip could not be probed: id={resource_id}, error={type(e).__name__}"
+        )
+        width, height, duration = 0, 0, 0.0
+    if (
+        target_aspect
+        and VideoAspect(target_aspect) != VideoAspect.square
+        and width
+        and height
+        and not _matches_video_aspect(width, height, VideoAspect(target_aspect))
+    ):
+        # Free accounts get no dimensions in search results, so orientation can
+        # only be confirmed here. Drop the file: it will not be used.
+        logger.info(
+            f"vecteezy clip {resource_id} is {width}x{height}, not {target_aspect}; discarded"
+        )
+        try:
+            os.remove(saved_path)
+        except OSError:
+            pass
+        return ""
+
+    if duration > 0:
+        item.duration = max(1, int(duration))
+    if width and height:
+        source["rendition"] = {"id": file_type, "width": width, "height": height}
+    source.update(vecteezy.attribution_fields(title, download))
+    item.source_info = source
+    return saved_path
 
 
 # WaveSpeed AI (https://wavespeed.ai) 通过文生视频模型按脚本关键词直接生成素材，
@@ -1349,19 +1641,30 @@ def _describe_download_progress(
     return f"{downloaded_mb:.1f} MB, {speed:.2f} MB/s"
 
 
-def save_video(video_url: str, save_dir: str = "") -> str:
+def _cached_video_path(cache_key: str, save_dir: str) -> tuple[str, str]:
+    # Query parameters can identify the asset itself (for example,
+    # /download?file_id=123). Dropping the query makes unrelated paid videos
+    # share one cache entry and silently reuse the first scene. Fragments are
+    # not sent in HTTP requests, so they do not affect the downloaded bytes.
+    url_hash = utils.md5(cache_key.split("#", 1)[0])
+    video_id = f"vid-{url_hash}"
+    return video_id, f"{save_dir}/{video_id}.mp4"
+
+
+def save_video(video_url: str, save_dir: str = "", cache_key: str | None = None) -> str:
+    """
+    Download ``video_url`` into ``save_dir`` and return the local path.
+
+    ``cache_key`` replaces the URL as the cache identity. Providers that hand
+    out a fresh signed URL per download (Vecteezy) pass their stable resource
+    reference so a re-used clip hits the local cache instead of the API.
+    """
     if not save_dir:
         save_dir = utils.storage_dir("cache_videos")
 
     os.makedirs(save_dir, exist_ok=True)
 
-    # Query parameters can identify the asset itself (for example,
-    # /download?file_id=123). Dropping the query makes unrelated paid videos
-    # share one cache entry and silently reuse the first scene. Fragments are
-    # not sent in HTTP requests, so they do not affect the downloaded bytes.
-    url_hash = utils.md5(video_url.split("#", 1)[0])
-    video_id = f"vid-{url_hash}"
-    video_path = f"{save_dir}/{video_id}.mp4"
+    video_id, video_path = _cached_video_path(cache_key or video_url, save_dir)
 
     # if video already exists, return the path
     if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
@@ -2285,10 +2588,13 @@ def _download_materials_in_parallel(
         downloaded = []
         for position, (search_term, item) in enumerate(materials, start=1):
             try:
-                saved_video_path = save_video(
-                    video_url=item.url,
-                    save_dir=material_directory,
-                )
+                if _is_vecteezy_item(item):
+                    saved_video_path = _save_vecteezy_video(item, material_directory)
+                else:
+                    saved_video_path = save_video(
+                        video_url=item.url,
+                        save_dir=material_directory,
+                    )
             except Exception as exc:
                 logger.error(
                     "failed to download material video: "
@@ -2310,9 +2616,13 @@ def _download_materials_in_parallel(
         thread_name_prefix="material-download",
     ) as executor:
         for search_term, item in materials:
+            if _is_vecteezy_item(item):
+                download, target = _save_vecteezy_video, item
+            else:
+                download, target = save_video, item.url
             futures[executor.submit(
-                logging_utils.bind_log_scope(save_video),
-                item.url,
+                logging_utils.bind_log_scope(download),
+                target,
                 material_directory,
             )] = (search_term, item)
 
@@ -2388,6 +2698,9 @@ def download_videos(
     elif source == "coverr":
         provider = "coverr"
         remote_search_videos = search_videos_coverr
+    elif source == "vecteezy":
+        provider = "vecteezy"
+        remote_search_videos = search_videos_vecteezy
 
     def search_videos(
         search_term: str,

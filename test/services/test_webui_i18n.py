@@ -23,6 +23,11 @@ PROVIDER_TIPS_PREFIXES = (
 ENGLISH_FALLBACK_KEYS = frozenset(
     {
         "Diagnostic Logging",
+        "Vecteezy",
+        "Vecteezy API Key",
+        "Vecteezy API Key Help",
+        "Vecteezy Account ID",
+        "Please Enter the Vecteezy API Key",
         "Diagnostic Logging Help",
         "Log Level",
         "Trace API Requests",
